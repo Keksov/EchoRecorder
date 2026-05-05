@@ -1,0 +1,11 @@
+object MainForm: TMainForm
+  Left = 440
+  Height = 320
+  Top = 220
+  Width = 720
+  Caption = 'EchoRecorder'
+  ClientHeight = 320
+  ClientWidth = 720
+  LCLVersion = '4.99.0.0'
+  OnCreate = FormCreate
+end

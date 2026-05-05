@@ -1,0 +1,12 @@
+app/build/
+app/scripts/env.bat
+cli/build/
+VendorsCore/
+app/EchoRecorder.lps
+app/*.compiled
+app/*.res
+app/*.dbg
+app/*.o
+app/*.ppu
+app/src/*.o
+app/src/*.ppu
