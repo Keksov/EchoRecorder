@@ -29,6 +29,18 @@ const
   DEFAULT_CONNECT_TIMEOUT_MS = 1500;
   DEFAULT_ACK_TIMEOUT_MS = 30000;
   DEFAULT_FINAL_TIMEOUT_MS = 120000;
+  VIBEVOICE_FINAL_TIMEOUT_PADDING_MS = 180000;
+  VIBEVOICE_FINAL_TIMEOUT_AUDIO_FACTOR = 12;
+
+type
+  TCollectedSegment = record
+    SegmentId              : Integer;
+    StartMs                : Int64;
+    EndMs                  : Int64;
+    Text                   : string;
+  end;
+
+  TCollectedSegments = array of TCollectedSegment;
 
 type
   TVoskDaemonClientState = class
@@ -45,6 +57,8 @@ type
     FdetectedLanguage       : string;
     FspeakerCount           : Integer;
     FspeakerSegments        : TRecorderSpeakerSegments;
+    FcollectedSegments      : TCollectedSegments;
+    FcollectedSegmentCount  : Integer;
     FProtocol               : TRecorderProtocolWriter;
     FSettings               : TRecorderSettings;
     FItem                   : TRecorderInputItem;
@@ -72,6 +86,8 @@ type
     property    DetectedLanguage: string read FdetectedLanguage;
     property    SpeakerCount: Integer read FspeakerCount;
     property    SpeakerSegments: TRecorderSpeakerSegments read FspeakerSegments;
+    property    CollectedSegments: TCollectedSegments read FcollectedSegments;
+    property    CollectedSegmentCount: Integer read FcollectedSegmentCount;
   end;
 
   TDaemonClientContext = record
@@ -103,6 +119,9 @@ end;
 function inferDaemonKindFromPort(aPort: Integer): TDaemonKind;
 begin
   if aPort = 7801 then
+    Exit(dkWhisper);
+
+  if aPort = 7802 then
     Exit(dkWhisper);
 
   Result := dkVosk;
@@ -159,6 +178,16 @@ var
 begin
   root := TJSONObject.Create;
   try
+    if aDaemonKind = dkDiarization then
+    begin
+      root.Add('event', 'diar_session_start');
+      root.Add('audio_format', 'pcm16le');
+      root.Add('sample_rate_hz', 16000);
+      root.Add('channels', 1);
+      root.Add('segment_hints_mode', 'auto');
+      Result := root.AsJSON;
+      Exit;
+    end;
     root.Add('event', 'session_start');
     root.Add('audio_format', 'pcm16le');
     root.Add('sample_rate_hz', 16000);
@@ -287,6 +316,8 @@ begin
   FdetectedLanguage := '';
   FspeakerCount := 0;
   SetLength(FspeakerSegments, 0);
+  SetLength(FcollectedSegments, 0);
+  FcollectedSegmentCount := 0;
   FProtocol := aProtocol;
   FSettings := aSettings;
   FItem := aItem;
@@ -429,6 +460,28 @@ begin
       Exit;
     end;
 
+    if eventName = 'diar_session_ack' then
+    begin
+      FAckSeen := True;
+      Exit;
+    end;
+
+    if eventName = 'diar_final' then
+    begin
+      parseSpeakerSegments(root);
+      FDone := True;
+      Exit;
+    end;
+
+    if (eventName = 'diar_error') or (eventName = 'diar_warning') then
+    begin
+      if eventName = 'diar_error' then
+        setError(jsonStringOf(root, 'message'))
+      else
+        WriteLn(StdErr, '[daemon] diar_warning: ', jsonStringOf(root, 'message'));
+      Exit;
+    end;
+
     if eventName = 'partial_update' then
     begin
       if FDaemonKind <> dkVosk then
@@ -478,15 +531,25 @@ begin
       if text <> '' then
         appendTextWithSpace(FSegmentText, text);
 
+      startMs := jsonInt64Of(root, 'start_ms');
+      endMs := jsonInt64Of(root, 'end_ms');
+      if (startMs = 0) and (root.Find('t0_ms') <> nil) then
+        startMs := jsonInt64Of(root, 't0_ms');
+      if (endMs = 0) and (root.Find('t1_ms') <> nil) then
+        endMs := jsonInt64Of(root, 't1_ms');
+      segmentId := Integer(jsonInt64Of(root, 'segment_id'));
+
+      { Collect segment for diarization hints }
+      if Length(FcollectedSegments) <= FcollectedSegmentCount then
+        SetLength(FcollectedSegments, FcollectedSegmentCount + 64);
+      FcollectedSegments[FcollectedSegmentCount].SegmentId := segmentId;
+      FcollectedSegments[FcollectedSegmentCount].StartMs := startMs;
+      FcollectedSegments[FcollectedSegmentCount].EndMs := endMs;
+      FcollectedSegments[FcollectedSegmentCount].Text := text;
+      Inc(FcollectedSegmentCount);
+
       if (text <> '') and (FProtocol <> nil) then
       begin
-        startMs := jsonInt64Of(root, 'start_ms');
-        endMs := jsonInt64Of(root, 'end_ms');
-        if (startMs = 0) and (root.Find('t0_ms') <> nil) then
-          startMs := jsonInt64Of(root, 't0_ms');
-        if (endMs = 0) and (root.Find('t1_ms') <> nil) then
-          endMs := jsonInt64Of(root, 't1_ms');
-        segmentId := Integer(jsonInt64Of(root, 'segment_id'));
         FProtocol.writeSegmentFinal(
           FItem,
           text,
@@ -617,22 +680,222 @@ begin
     aClients[idx].Client.SendMessage(messageText);
 end;
 
+function hasDiarizationClients(const aClients: TDaemonClientContexts): Boolean;
+var
+  idx: Integer;
+begin
+  Result := False;
+  for idx := 0 to High(aClients) do
+    if aClients[idx].Kind = dkDiarization then
+      Exit(True);
+end;
+
+function allAsrClientsDone(const aClients: TDaemonClientContexts): Boolean;
+var
+  idx: Integer;
+begin
+  Result := True;
+  for idx := 0 to High(aClients) do
+    if aClients[idx].Kind <> dkDiarization then
+      if (aClients[idx].State = nil) or (not aClients[idx].State.Done) then
+        Exit(False);
+end;
+
+function allDiarClientsDone(const aClients: TDaemonClientContexts): Boolean;
+var
+  idx: Integer;
+begin
+  Result := True;
+  for idx := 0 to High(aClients) do
+    if aClients[idx].Kind = dkDiarization then
+      if (aClients[idx].State = nil) or (not aClients[idx].State.Done) then
+        Exit(False);
+end;
+
+procedure waitForAsrClientsDone(
+  const aWhat: string;
+  aTimeoutMs: Integer;
+  var aClients: TDaemonClientContexts
+);
+var
+  endTick: QWord;
+  nowTick: QWord;
+begin
+  endTick := GetTickCount64 + QWord(aTimeoutMs);
+  repeat
+    drainClients(aClients);
+    checkClientErrors(aClients);
+    if allAsrClientsDone(aClients) then
+      Exit;
+    nowTick := GetTickCount64;
+    if nowTick >= endTick then
+      raise Exception.CreateFmt('Timed out waiting for daemon %s', [aWhat]);
+    Sleep(10);
+  until False;
+end;
+
+function resolveAsrFinalTimeoutMs(
+  const aClients: TDaemonClientContexts;
+  aTotalBytes: Int64
+): Integer;
+var
+  audioDurationMs: Int64;
+  idx: Integer;
+begin
+  Result := DEFAULT_FINAL_TIMEOUT_MS;
+  for idx := 0 to High(aClients) do
+    if (aClients[idx].Kind <> dkDiarization) and (aClients[idx].Port = 7802) then
+    begin
+      audioDurationMs := ((aTotalBytes div 2) * 1000) div 16000;
+      Result := Integer(audioDurationMs * VIBEVOICE_FINAL_TIMEOUT_AUDIO_FACTOR) +
+        VIBEVOICE_FINAL_TIMEOUT_PADDING_MS;
+      if Result < DEFAULT_FINAL_TIMEOUT_MS then
+        Result := DEFAULT_FINAL_TIMEOUT_MS;
+      Exit;
+    end;
+end;
+
+procedure waitForDiarClientsDone(
+  const aWhat: string;
+  aTimeoutMs: Integer;
+  var aClients: TDaemonClientContexts
+);
+var
+  endTick: QWord;
+  nowTick: QWord;
+begin
+  endTick := GetTickCount64 + QWord(aTimeoutMs);
+  repeat
+    drainClients(aClients);
+    checkClientErrors(aClients);
+    if allDiarClientsDone(aClients) then
+      Exit;
+    nowTick := GetTickCount64;
+    if nowTick >= endTick then
+      raise Exception.CreateFmt('Timed out waiting for daemon %s', [aWhat]);
+    Sleep(10);
+  until False;
+end;
+
+function buildDiarFlushMessage: string;
+var
+  root: TJSONObject;
+begin
+  root := TJSONObject.Create;
+  try
+    root.Add('event', 'diar_flush');
+    Result := root.AsJSON;
+  finally
+    root.Free;
+  end;
+end;
+
+function buildDiarSetSegmentsMessage(const aClients: TDaemonClientContexts): string;
+var
+  arr: TJSONArray;
+  cidx: Integer;
+  idx: Integer;
+  root: TJSONObject;
+  seg: TJSONObject;
+  totalSegId: Integer;
+begin
+  root := TJSONObject.Create;
+  try
+    root.Add('event', 'diar_set_segments');
+    arr := TJSONArray.Create;
+    totalSegId := 0;
+    for cidx := 0 to High(aClients) do
+    begin
+      if aClients[cidx].Kind = dkDiarization then
+        Continue;
+      if aClients[cidx].State = nil then
+        Continue;
+      for idx := 0 to aClients[cidx].State.CollectedSegmentCount - 1 do
+      begin
+        seg := TJSONObject.Create;
+        seg.Add('segment_id', totalSegId);
+        seg.Add('start_ms', aClients[cidx].State.CollectedSegments[idx].StartMs);
+        seg.Add('end_ms', aClients[cidx].State.CollectedSegments[idx].EndMs);
+        seg.Add('text', aClients[cidx].State.CollectedSegments[idx].Text);
+        arr.Add(seg);
+        Inc(totalSegId);
+      end;
+    end;
+    root.Add('segments', arr);
+    Result := root.AsJSON;
+  finally
+    root.Free;
+  end;
+end;
+
+procedure sendFlushToAsrClients(var aClients: TDaemonClientContexts);
+var
+  idx: Integer;
+  messageText: string;
+begin
+  messageText := buildFlushMessage;
+  for idx := 0 to High(aClients) do
+    if aClients[idx].Kind <> dkDiarization then
+      aClients[idx].Client.SendMessage(messageText);
+end;
+
+procedure sendDiarSetSegmentsToClients(
+  var aClients: TDaemonClientContexts
+);
+var
+  idx: Integer;
+  messageText: string;
+begin
+  messageText := buildDiarSetSegmentsMessage(aClients);
+  for idx := 0 to High(aClients) do
+    if aClients[idx].Kind = dkDiarization then
+      aClients[idx].Client.SendMessage(messageText);
+end;
+
+procedure sendFlushToDiarClients(var aClients: TDaemonClientContexts);
+var
+  idx: Integer;
+  messageText: string;
+begin
+  messageText := buildDiarFlushMessage;
+  for idx := 0 to High(aClients) do
+    if aClients[idx].Kind = dkDiarization then
+      aClients[idx].Client.SendMessage(messageText);
+end;
+
 function buildDaemonAggregateText(const aClients: TDaemonClientContexts): string;
 var
   idx: Integer;
+  asrCount: Integer;
   line: string;
   text: string;
 begin
   Result := '';
-  if Length(aClients) = 1 then
+  { Count ASR (non-diarization) clients }
+  asrCount := 0;
+  for idx := 0 to High(aClients) do
+    if aClients[idx].Kind <> dkDiarization then
+      Inc(asrCount);
+
+  if asrCount = 0 then
+    Exit;
+
+  if asrCount = 1 then
   begin
-    if aClients[0].State <> nil then
-      Result := aClients[0].State.FinalText;
+    for idx := 0 to High(aClients) do
+      if aClients[idx].Kind <> dkDiarization then
+      begin
+        if aClients[idx].State <> nil then
+          Result := aClients[idx].State.FinalText;
+        Break;
+      end;
     Exit;
   end;
 
   for idx := 0 to High(aClients) do
   begin
+    if aClients[idx].Kind = dkDiarization then
+      Continue;
     text := '';
     if aClients[idx].State <> nil then
       text := Trim(aClients[idx].State.FinalText);
@@ -662,6 +925,10 @@ begin
 
   for idx := 0 to High(aClients) do
   begin
+    { Diarization endpoint has no transcript: skip server_final for it }
+    if aClients[idx].Kind = dkDiarization then
+      Continue;
+
     resultData := emptyRecorderResult;
     resultData.Ok := True;
     resultData.StatusCode := 200;
@@ -775,9 +1042,21 @@ begin
       raise Exception.Create('PCM16LE stdin ended on an odd byte boundary');
 
     aItem.SizeBytes := totalBytes;
-    sendFlushToClients(clients);
-    waitForClientsState('session_final', DEFAULT_FINAL_TIMEOUT_MS, clients, False, True);
+
+    { Stage 1: flush ASR clients and wait for their session_final }
+    sendFlushToAsrClients(clients);
+    waitForAsrClientsDone('session_final', resolveAsrFinalTimeoutMs(clients, totalBytes), clients);
     checkClientErrors(clients);
+
+    { Stage 2: if diarization clients exist, send segment hints then diar_flush }
+    if hasDiarizationClients(clients) then
+    begin
+      sendDiarSetSegmentsToClients(clients);
+      sendFlushToDiarClients(clients);
+      waitForDiarClientsDone('diar_final', DEFAULT_FINAL_TIMEOUT_MS, clients);
+      checkClientErrors(clients);
+    end;
+
     writeDaemonServerFinals(aSettings, aItem, clients, aProtocol);
 
     Result.TargetModel := 'multi-daemon';
@@ -787,6 +1066,15 @@ begin
     begin
       if clients[idx].State = nil then
         Continue;
+      { Prefer diarization endpoint speaker fields over ASR-provided ones }
+      if clients[idx].Kind = dkDiarization then
+      begin
+        if clients[idx].State.SpeakerCount > 0 then
+          Result.SpeakerCount := clients[idx].State.SpeakerCount;
+        if Length(clients[idx].State.SpeakerSegments) > 0 then
+          Result.SpeakerSegments := clients[idx].State.SpeakerSegments;
+        Continue;
+      end;
       if (Result.Language = aSettings.Language) and (clients[idx].State.FinalLanguage <> '') then
         Result.Language := clients[idx].State.FinalLanguage;
       if (Result.DetectedLanguage = '') and (clients[idx].State.DetectedLanguage <> '') then

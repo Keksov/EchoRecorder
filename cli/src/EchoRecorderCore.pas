@@ -59,6 +59,12 @@ begin
   if SameText(aValue, 'whisper') or SameText(aValue, 'whisperdaemon') then
     Exit(dkWhisper);
 
+  if SameText(aValue, 'diarization') or SameText(aValue, 'diarizationdaemon') then
+    Exit(dkDiarization);
+
+  if SameText(aValue, 'vibevoice') or SameText(aValue, 'vibevoicedaemon') then
+    Exit(dkWhisper);
+
   raise Exception.CreateFmt('Unsupported daemon kind: %s', [aValue]);
 end;
 
@@ -66,6 +72,12 @@ function inferDaemonKindFromPort(aPort: Integer): TDaemonKind;
 begin
   if aPort = 7801 then
     Exit(dkWhisper);
+
+  if aPort = 7802 then
+    Exit(dkWhisper);
+
+  if aPort = 7900 then
+    Exit(dkDiarization);
 
   Result := dkVosk;
 end;

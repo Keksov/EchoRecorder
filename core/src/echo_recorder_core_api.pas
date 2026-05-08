@@ -10,7 +10,7 @@ uses
 type
   TIntegerArray = array of Integer;
 
-  TDaemonKind = (dkVosk, dkWhisper);
+  TDaemonKind = (dkVosk, dkWhisper, dkDiarization);
   TDaemonEndpoint = record
     Kind: TDaemonKind;
     Host: string;
@@ -193,6 +193,8 @@ begin
       Result := 'vosk';
     dkWhisper:
       Result := 'whisper';
+    dkDiarization:
+      Result := 'diarization';
   end;
 end;
 
