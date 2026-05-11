@@ -10,3 +10,5 @@ app/*.o
 app/*.ppu
 app/src/*.o
 app/src/*.ppu
+vendors/pixie/
+vendors/pixie.bak/

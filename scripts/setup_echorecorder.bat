@@ -1,16 +1,16 @@
 @echo off
 REM ============================================================
 REM EchoScript — Setup: EchoRecorder
-REM Initializes git submodules and provisions the FPC toolchain.
+REM Clones nested git repositories and provisions the FPC toolchain.
 REM
 REM Steps:
 REM   [1/4] Clone VendorsCore (if absent)
-REM   [2/4] Initialize vendors/pixie git submodule
+REM   [2/4] Clone vendors/pixie nested repository (if absent)
 REM   [3/4] Provision FPC x86_64-win64 toolchain (via fpc_release_setup.bat)
 REM   [4/4] Verify Lazarus installation (for GUI app build)
 REM
 REM Requirements:
-REM   - git.exe on PATH  (submodule init)
+REM   - git.exe on PATH  (clone)
 REM   - PowerShell       (FPC release download and hash verification)
 REM
 REM Optional (GUI app build only):
@@ -47,18 +47,23 @@ if not exist "%ECHO_RECORDER_ROOT%\VendorsCore\.git" (
 )
 echo.
 
-REM --- [2/4] pixie submodule ---
-echo [2/4] Initializing vendors/pixie git submodule ...
+REM --- [2/4] pixie nested repository ---
+echo [2/4] Checking vendors/pixie nested repository ...
 if not exist "%ECHO_RECORDER_ROOT%\vendors\pixie\.git" (
-    git -C "%ECHO_RECORDER_ROOT%" submodule update --init -- vendors/pixie
+    if exist "%ECHO_RECORDER_ROOT%\vendors\pixie" (
+        echo [WARN] Existing vendors/pixie found without .git. Recreating the folder ...
+        rmdir /s /q "%ECHO_RECORDER_ROOT%\vendors\pixie"
+    )
+    echo [INFO] Cloning pixie ...
+    git clone https://gitlab.com/retrofoxed/pixie.git "%ECHO_RECORDER_ROOT%\vendors\pixie"
     if errorlevel 1 (
-        echo [ERROR] Failed to initialize pixie submodule.
-        echo         Ensure git.exe is on PATH and the repository is properly cloned.
+        echo [ERROR] Failed to clone pixie.
+        echo         Ensure git.exe is on PATH and internet access is available.
         goto :fail
     )
-    echo [INFO] Pixie submodule initialized.
+    echo [INFO] Pixie cloned.
 ) else (
-    echo [INFO] Pixie submodule already initialized.
+    echo [INFO] Pixie nested repository already present.
 )
 echo.
 
