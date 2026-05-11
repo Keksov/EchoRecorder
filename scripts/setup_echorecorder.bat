@@ -5,12 +5,12 @@ REM Clones nested git repositories and provisions the FPC toolchain.
 REM
 REM Steps:
 REM   [1/4] Clone VendorsCore (if absent)
-REM   [2/4] Clone vendors/pixie nested repository (if absent)
+REM   [2/4] Prepare vendors/pixie nested repository ^(clone + remotes^)
 REM   [3/4] Provision FPC x86_64-win64 toolchain (via fpc_release_setup.bat)
 REM   [4/4] Verify Lazarus installation (for GUI app build)
 REM
 REM Requirements:
-REM   - git.exe on PATH  (clone)
+REM   - git.exe on PATH  (clone + git remote config)
 REM   - PowerShell       (FPC release download and hash verification)
 REM
 REM Optional (GUI app build only):
@@ -25,6 +25,8 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "ECHO_RECORDER_ROOT=%%~fI"
+if not defined PIXIE_UPSTREAM_URL set "PIXIE_UPSTREAM_URL=https://gitlab.com/retrofoxed/pixie.git"
+if not defined PIXIE_ORIGIN_URL set "PIXIE_ORIGIN_URL=https://github.com/Keksov/pixie.git"
 
 echo ============================================================
 echo  EchoRecorder Setup
@@ -49,13 +51,14 @@ echo.
 
 REM --- [2/4] pixie nested repository ---
 echo [2/4] Checking vendors/pixie nested repository ...
-if not exist "%ECHO_RECORDER_ROOT%\vendors\pixie\.git" (
-    if exist "%ECHO_RECORDER_ROOT%\vendors\pixie" (
+set "PIXIE_DIR=%ECHO_RECORDER_ROOT%\vendors\pixie"
+if not exist "%PIXIE_DIR%\.git" (
+    if exist "%PIXIE_DIR%" (
         echo [WARN] Existing vendors/pixie found without .git. Recreating the folder ...
-        rmdir /s /q "%ECHO_RECORDER_ROOT%\vendors\pixie"
+        rmdir /s /q "%PIXIE_DIR%"
     )
     echo [INFO] Cloning pixie ...
-    git clone https://gitlab.com/retrofoxed/pixie.git "%ECHO_RECORDER_ROOT%\vendors\pixie"
+    git clone "%PIXIE_ORIGIN_URL%" "%PIXIE_DIR%"
     if errorlevel 1 (
         echo [ERROR] Failed to clone pixie.
         echo         Ensure git.exe is on PATH and internet access is available.
@@ -65,6 +68,73 @@ if not exist "%ECHO_RECORDER_ROOT%\vendors\pixie\.git" (
 ) else (
     echo [INFO] Pixie nested repository already present.
 )
+
+echo [INFO] Configuring pixie remotes: upstream ^(fetch-only^) and origin ^(push target^) ...
+git -C "%PIXIE_DIR%" remote rename origin upstream >nul 2>nul
+
+git -C "%PIXIE_DIR%" remote get-url upstream >nul 2>nul
+if errorlevel 1 (
+    git -C "%PIXIE_DIR%" remote add upstream "%PIXIE_UPSTREAM_URL%"
+    if errorlevel 1 (
+        echo [ERROR] Failed to configure upstream remote for pixie.
+        goto :fail
+    )
+) else (
+    git -C "%PIXIE_DIR%" remote set-url upstream "%PIXIE_UPSTREAM_URL%"
+    if errorlevel 1 (
+        echo [ERROR] Failed to update upstream remote URL for pixie.
+        goto :fail
+    )
+)
+
+git -C "%PIXIE_DIR%" remote get-url origin >nul 2>nul
+if errorlevel 1 (
+    git -C "%PIXIE_DIR%" remote add origin "%PIXIE_ORIGIN_URL%"
+    if errorlevel 1 (
+        echo [ERROR] Failed to configure origin remote for pixie.
+        goto :fail
+    )
+) else (
+    git -C "%PIXIE_DIR%" remote set-url origin "%PIXIE_ORIGIN_URL%"
+    if errorlevel 1 (
+        echo [ERROR] Failed to update origin remote URL for pixie.
+        goto :fail
+    )
+)
+
+git -C "%PIXIE_DIR%" config remote.upstream.pushurl DISABLED
+if errorlevel 1 (
+    echo [ERROR] Failed to disable push to upstream for pixie.
+    goto :fail
+)
+
+git -C "%PIXIE_DIR%" config branch.master.remote upstream
+if errorlevel 1 (
+    echo [ERROR] Failed to configure branch.master.remote for pixie.
+    goto :fail
+)
+
+git -C "%PIXIE_DIR%" config branch.master.merge refs/heads/master
+if errorlevel 1 (
+    echo [ERROR] Failed to configure branch.master.merge for pixie.
+    goto :fail
+)
+
+git -C "%PIXIE_DIR%" config branch.master.pushRemote origin
+if errorlevel 1 (
+    echo [ERROR] Failed to configure branch.master.pushRemote for pixie.
+    goto :fail
+)
+
+git -C "%PIXIE_DIR%" config remote.pushDefault origin
+if errorlevel 1 (
+    echo [ERROR] Failed to configure remote.pushDefault for pixie.
+    goto :fail
+)
+
+echo [INFO] Pixie git workflow configured:
+echo        fetch/pull source: upstream ^(%PIXIE_UPSTREAM_URL%^)
+echo        push target:       origin   ^(%PIXIE_ORIGIN_URL%^)
 echo.
 
 REM --- [3/4] FPC toolchain ---
