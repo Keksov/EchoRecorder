@@ -11,7 +11,7 @@ REM   [4/4] Verify Lazarus installation (for GUI app build)
 REM
 REM Requirements:
 REM   - git.exe on PATH  (clone + git remote config)
-REM   - PowerShell       (FPC release download and hash verification)
+REM   - pwsh       (FPC release download and hash verification)
 REM
 REM Optional (GUI app build only):
 REM   - Lazarus 4.6 installed; path configured in app\scripts\env.bat
