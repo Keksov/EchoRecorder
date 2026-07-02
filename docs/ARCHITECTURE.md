@@ -311,12 +311,38 @@ EchoRecorder, а не одним `transcribe_file`. Это снимает 10-м�
   держит `FcommittedMs` и эмитит `segment_final`/`word_committed` со сдвигом (сброс на `session_start`);
   `transcribe_file` (one-shot) не затронут. Проверено E2E (`orchestrator/scripts/e2e_stream_manual.ts`).
 
+### Файловый drop + саморегистрация демонов (readiness)
+Возвращено поведение старого Python-watcher: **сырой медиафайл**, бро­шенный в
+`jobs/input/<model>/`, снова становится заданием. Плюс закрыт timing: если файл появился, а
+ws-daemon ещё не запущен, задание **ждёт в очереди**, а не падает.
+
+- **Drop** (`input-drop.ts` + `file-drop.ts`): оркестратор на старте сканирует `input/<model>/`, а
+  дальше слушает `fs.watch` + reconcile-sweep. Файл берётся только когда его mtime стабилен ≥
+  `drop_stable_ms` (защита от недокопированного), атомарно клеймится в `.processing`, **перемещается**
+  в `data/<id>/input` и создаётся обычным `JobManager`/`enqueue` (один контракт `jobs/`). Осиротевшие
+  `.processing` (краш после клейма) восстанавливаются на старте.
+- **Саморегистрация демонов** (`daemon-registry.ts` + `-watcher.ts`): демон, став готовым, **атомарно**
+  пишет `jobs/registry/<model>.json` `{name, host, port, model_name, state, pid, input:{codec,
+  sample_rate_hz, channels}, updated_at}` и обновляет `updated_at` как heartbeat (whisperdaemon —
+  каждые 5 c, `--registry-dir`/`ECHOSCRIPT_REGISTRY_DIR`, дефолт `<root>/jobs/registry`). Оркестратор
+  watch'ит папку; запись «готова», только если `updated_at` не старше `daemon_registry_ttl_ms`
+  (дефолт 15000; инвариант TTL ≥ ~3× heartbeat). `jobs/registry/` создаёт оркестратор.
+- **Readiness-gate + requeue** (`scheduler.ts`): `dispatchNext` берёт первое **выполнимое** задание —
+  python-модели всегда (оркестратор сам стартует воркер), ws-daemon-модели только при свежей
+  `ready`-записи (диспетч на **announced** host/port), неготовые пропускаются (без head-of-line
+  блокировки). Транспортный сбой (`DaemonUnreachableError`: connect/close/stall) → **requeue** (статус
+  `waiting`), а не terminal `failed`; демон при этом инвалидируется до следующего свежего heartbeat
+  (без шторма повторов). Задание для невыключенного демона просто **остаётся в очереди** (`queued`),
+  пока демон не зарегистрируется.
+
 ### Компоненты
 - `orchestrator/src/audio-convert.ts` — ffmpeg → pcm16le 16k mono (`config.ffmpegPath` / env `ECHOSCRIPT_FFMPEG_PATH`).
 - `orchestrator/src/daemon-stream-driver.ts` — WS-клиент стриминга: `transcribeFileStreaming` (окна, прогресс, rollover).
 - `orchestrator/src/daemon-driver.ts` — WS-клиент: `describeDaemon`, `transcribeFileViaDaemon` (one-shot; для тестов/совместимости).
 - `orchestrator/src/ws-daemon-runner.ts` — convert→стрим-драйвер→`progress.json`→артефакты (владелец контракта `jobs/`).
-- `orchestrator/src/scheduler.ts` — маршрутизация ws-daemon vs python; пробрасывает окно/rollover из конфига.
+- `orchestrator/src/scheduler.ts` — маршрутизация + readiness-gate (peek-dispatchable) + requeue; startup-scan/watch drop.
+- `orchestrator/src/daemon-registry.ts` / `-watcher.ts` — реестр готовности демонов (TTL-свежесть, инвалидация).
+- `orchestrator/src/file-drop.ts` / `input-drop.ts` — claim/job_id/bootstrap дропнутых файлов + сканер `input/<model>/`.
 - `services/whisperdaemon/daemon.json` — дескриптор формата/возможностей.
 
 ### Запуск и тесты
@@ -324,7 +350,8 @@ EchoRecorder, а не одним `transcribe_file`. Это снимает 10-м�
 - Юнит: `cd orchestrator && bun test` (audio-convert, daemon-driver, **daemon-stream-driver**, ws-daemon-runner, job-manager).
 - E2E HTTP: `pwsh -NoProfile -File tests\whisperdaemon-file-api.ps1` (реальный файл через HTTP API → `ready` + артефакты).
 - E2E стрим (ручной, нужен живой демон): `cd orchestrator && bun run scripts\e2e_stream_manual.ts [audio.wav] [port]`.
-- План инициативы стрим-моста: `orchestrator/spec/file-streaming-bridge-plan.md`.
+- E2E drop (ручной, поднимает оркестратор+демон, изолированный jobs-root): `bash orchestrator/scripts/e2e_drop_manual.sh [audio] [port]`.
+- Планы инициатив: `orchestrator/spec/file-streaming-bridge-plan.md`, `orchestrator/spec/jobs-drop-daemon-registry-plan.md`.
 
 > Подробности по демону — `services/whisperdaemon/README.md`.
 > Паритет ws-daemon и Python — по **схеме/контракту** артефактов, не по дословному тексту
