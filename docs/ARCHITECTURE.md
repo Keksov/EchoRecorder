@@ -297,10 +297,12 @@ EchoRecorder, а не одним `transcribe_file`. Это снимает 10-м�
   окнами, шлёт `session_start` (контракт `sample_rate_hz=16000, channels=1, audio_format=pcm16le`) →
   бинарные кадры → `flush` → ждёт `session_final`. Backpressure по `bufferedAmount`; **heartbeat**
   вместо глобального таймаута (сбрасывается на каждом событии демона).
-- **Окно/rollover — из `config.json`:** `stream_window_ms` (дефолт 30000), `stream_rollover_ms`
-  (дефолт 1200000). Rollover (страховка от 30-мин лимита буфера демона) = финализация и продолжение
-  на **новом WS-соединении** со сдвигом таймстампов; на практике коммиты по границам предложений
-  срабатывают задолго до порога.
+- **Окно/нарезка — из `config.json`:** `stream_window_ms` (дефолт 30000), `stream_chunk_ms`
+  (дефолт 300000 = 5 мин). Длинное аудио режется на **последовательные chunk-сессии**: каждая сессия
+  шлёт ≤ chunk аудио, затем `flush`→`session_final`→close, следующая продолжает **на новом
+  WS-соединении** со сдвигом таймстампов. Сессии строго последовательны → буфер демона всегда ≤ chunk
+  (не достигает 30-мин лимита) и нет переподключения во время идущего инференса. *(Заменяет прежний
+  rollover-по-порогу, который на длинных файлах с редкой речью спотыкался о блокирующий демон — LF-D1.)*
 - **Прогресс:** раннер пишет `data/<id>/progress.json`
   `{progress_pct, windows_done, windows_total, processed_ms, total_ms, updated_at}` (overwrite,
   троттлинг, финальные 100%). `status.json` остаётся append-лентой lifecycle. API — **аддитивно**:
@@ -338,15 +340,17 @@ ws-daemon ещё не запущен, задание **ждёт в очеред�
   инференсе демон между коммитами молчит дольше stream-heartbeat (120 c). Чтобы это **не** считалось
   «недоступностью» и не давало бесконечный requeue, whisperdaemon шлёт `{event:keepalive}` из whisper
   `progressCallback` (троттл ~3 c) — оркестратор сбрасывает heartbeat на нём, так что heartbeat =
-  реальная живость. Плюс страховка: после `max_requeue_attempts` транспортных сбоев задание падает
-  честным `failed`, а не крутится вечно.
+  реальная живость. keepalive-`Send` в демоне **best-effort** (try/except): обрыв соединения не рушит
+  инференс (иначе `10054` читался как OOM → ложный retry). Плюс страховка: после
+  `max_requeue_attempts` транспортных сбоев задание падает честным `failed`, а не крутится вечно.
 - **Известное ограничение:** WS-сервер демона **однопоточный** — во время длинного инференса он держит
-  `gInferenceLock` и не отменяет инференс при обрыве клиента (нет abort-on-disconnect). keepalive +
-  лимит повторов гасят каскад, но не-блокирующий сервер/отмена — отдельная будущая работа.
+  `gInferenceLock` и не отменяет инференс при обрыве клиента (нет abort-on-disconnect). Нарезка на
+  последовательные chunk-сессии (см. выше) обходит это для длинных файлов; полноценно снимет
+  ограничение инициатива `daemon-concurrency` (неблокирующий сервер + abort-on-disconnect).
 
 ### Компоненты
 - `orchestrator/src/audio-convert.ts` — ffmpeg → pcm16le 16k mono (`config.ffmpegPath` / env `ECHOSCRIPT_FFMPEG_PATH`).
-- `orchestrator/src/daemon-stream-driver.ts` — WS-клиент стриминга: `transcribeFileStreaming` (окна, прогресс, rollover).
+- `orchestrator/src/daemon-stream-driver.ts` — WS-клиент стриминга: `transcribeFileStreaming` (окна, прогресс, нарезка на chunk-сессии).
 - `orchestrator/src/daemon-driver.ts` — WS-клиент: `describeDaemon`, `transcribeFileViaDaemon` (one-shot; для тестов/совместимости).
 - `orchestrator/src/ws-daemon-runner.ts` — convert→стрим-драйвер→`progress.json`→артефакты (владелец контракта `jobs/`).
 - `orchestrator/src/scheduler.ts` — маршрутизация + readiness-gate (peek-dispatchable) + requeue; startup-scan/watch drop.
