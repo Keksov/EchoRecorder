@@ -375,6 +375,24 @@ ws-daemon ещё не запущен, задание **ждёт в очеред�
 `ggml-silero-v5.1.2.bin` (`download_whisper_models.bat vad`); `WHISPER_VAD=0` отключает. Эффект на
 медитации CD4 (38 мин): повторы `×27/×54 → 0`, ~81% аудио (музыка) отброшено, **~6× быстрее**, речь цела.
 
+### Панель управления (control-panel :3001, control plane)
+Отдельное Bun-приложение рядом с оркестратором (data plane :3000), Quasar-UI + Bun-сервер
+(`control-panel/`, localhost-only, без auth в v1). Координация — через ту же файловую шину
+(`config.json`, `jobs/registry/`).
+- **Настройки (единственный писатель):** `config.json` — источник истины, control-server пишет
+  атомарно (temp+rename) с валидацией по схеме; UI-формы генерятся из схемы, у каждого поля
+  двуязычные (ru/en) label+описание и бейдж `hot`/`рестарт`.
+- **Hot-reload оркестратора:** оркестратор `fs.watch(config.json)` перечитывает безопасные поля
+  (интервалы/TTL/drop_stable/requeue/ws_daemons-роутинг) на лету; restart-класс (`jobs_root`,
+  `max_workers`) — кнопкой «Перезапустить оркестратор».
+- **Жизненный цикл сервисов:** старт/стоп/рестарт оркестратора и демонов из UI (инвентарь
+  `services.json` → скрипты, верификация port-probe). Нативный `orchestrator/monitor` не тронут.
+- **Тюнинг демона:** VAD (on/off, threshold, speech-pad), decode-пороги (no_speech/entropy), GPU —
+  правятся в UI, доезжают до демона **при (пере)старте** через env из config (`DAEMON_ENV_MAP`).
+- **Провижининг моделей:** вкладка «Модели» — статус ggml-ассетов + запуск `download_whisper_models.bat`.
+- Ограничение (Windows): демон, запущенный панелью, наследует её слушающий сокет :3001 — рестарт
+  панели при живых запущенных ею демонах требует освободить :3001. Подробности — `control-panel/README.md`.
+
 ### Компоненты
 - `orchestrator/src/audio-convert.ts` — ffmpeg → pcm16le 16k mono (`config.ffmpegPath` / env `ECHOSCRIPT_FFMPEG_PATH`).
 - `orchestrator/src/daemon-stream-driver.ts` — WS-клиент стриминга: `transcribeFileStreaming` (окна, прогресс, нарезка на chunk-сессии).
