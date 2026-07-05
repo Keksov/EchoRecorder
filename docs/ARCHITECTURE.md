@@ -352,6 +352,29 @@ ws-daemon ещё не запущен, задание **ждёт в очеред�
   последовательные chunk-сессии (см. выше) обходит это для длинных файлов; полноценно снимет
   ограничение инициатива `daemon-concurrency` (неблокирующий сервер + abort-on-disconnect).
 
+### Языковой роутинг (`input/<engine>/<lang>/`) + VAD
+Язык оригинала задаётся **подкаталогом** дропа: `jobs/input/<engine>/<lang>/` (`whisper/en/`,
+`whisper/ru/`, …). Пара `(engine, language)` **резолвится в конкретную модель на интейке**, поэтому
+роутинг/реестр/readiness-gate не меняются — job уже несёт разрезолвленную модель.
+
+- **Резолв** (`engine-routing.ts` + `input-drop.ts`): таблица `(engine, language) → model_name` строится
+  из `ws_daemons` (каждый демон объявляет `engine`+`language`+`model_name`: `whisperdaemon`→
+  `whisper`/`ru`/`whisper_podlodka`, `whisperdaemon_en`→`whisper`/`en`/`whisper_en_turbo`). Файл в
+  `input/whisper/en/` → job `whisper_en_turbo` + `params.language="en"` (+ `requested_language` в
+  `input.json`). Легаси `input/<model_name>/` (плоско, без lang) работает как раньше.
+- **Mixed (без языка):** файл прямо в `input/<engine>/` = «несколько языков» — пока **отклоняется**:
+  переносится в `input/<engine>/_unrouted/` (не транскрибируется неверным языком). Полноценный
+  per-fragment (VAD+language-ID) — будущая работа.
+- **Модели по языку:** `download_whisper_models.bat <lang>` (манифест язык→модель); EN =
+  `ggml-large-v3-turbo` (f16, ~1.6 ГБ). Каждый язык — свой демон/порт (`whisperdaemon_en` :7802).
+
+**VAD (анти-повторы):** whisper авторегрессионно **зацикливается на не-речи** (музыка/тишина →
+`«фраза» ×N`). Лечится встроенным Silero-VAD whisper.cpp: не-речь вырезается **до** инференса. VAD
+работает только в `whisper_full` (не в `whisper_full_with_state`) → демон создаёт контекст **со state** и
+зовёт `whisper_full` + ctx-аксессоры; whisper сам ремапит тайминги на исходную ось. Модель
+`ggml-silero-v5.1.2.bin` (`download_whisper_models.bat vad`); `WHISPER_VAD=0` отключает. Эффект на
+медитации CD4 (38 мин): повторы `×27/×54 → 0`, ~81% аудио (музыка) отброшено, **~6× быстрее**, речь цела.
+
 ### Компоненты
 - `orchestrator/src/audio-convert.ts` — ffmpeg → pcm16le 16k mono (`config.ffmpegPath` / env `ECHOSCRIPT_FFMPEG_PATH`).
 - `orchestrator/src/daemon-stream-driver.ts` — WS-клиент стриминга: `transcribeFileStreaming` (окна, прогресс, нарезка на chunk-сессии).
@@ -359,7 +382,7 @@ ws-daemon ещё не запущен, задание **ждёт в очеред�
 - `orchestrator/src/ws-daemon-runner.ts` — convert→стрим-драйвер→`progress.json`→артефакты (владелец контракта `jobs/`).
 - `orchestrator/src/scheduler.ts` — маршрутизация + readiness-gate (peek-dispatchable) + requeue; startup-scan/watch drop.
 - `orchestrator/src/daemon-registry.ts` / `-watcher.ts` — реестр готовности демонов (TTL-свежесть, инвалидация).
-- `orchestrator/src/file-drop.ts` / `input-drop.ts` — claim/job_id/bootstrap дропнутых файлов + сканер `input/<model>/`.
+- `orchestrator/src/file-drop.ts` / `input-drop.ts` / `engine-routing.ts` — claim/job_id/bootstrap дропнутых файлов + сканер `input/<model>/` и `input/<engine>/<lang>/` (резолв языка в модель, reject mixed).
 - `services/whisperdaemon/daemon.json` — дескриптор формата/возможностей.
 
 ### Запуск и тесты
