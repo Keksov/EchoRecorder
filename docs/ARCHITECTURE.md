@@ -379,19 +379,28 @@ ws-daemon ещё не запущен, задание **ждёт в очеред�
 Отдельное Bun-приложение рядом с оркестратором (data plane :3000), Quasar-UI + Bun-сервер
 (`control-panel/`, localhost-only, без auth в v1). Координация — через ту же файловую шину
 (`config.json`, `jobs/registry/`).
-- **Настройки (единственный писатель):** `config.json` — источник истины, control-server пишет
-  атомарно (temp+rename) с валидацией по схеме; UI-формы генерятся из схемы, у каждого поля
-  двуязычные (ru/en) label+описание и бейдж `hot`/`рестарт`.
+
+**Движок — `echoctl` (FPC CLI):** единственный писатель `config.json` и движок управления флотом
+демонов и моделями. Bun-сервер — тонкая обёртка: шеллит `echoctl … --json` (`server/echoctl.ts`) и
+прокидывает результат (UI = обёртка). См. `echoctl/README.md`.
+- **Настройки (единственный писатель):** `config.json` пишется атомарно (temp+`MoveFileEx`) через
+  `echoctl config set` с валидацией тип/диапазон/reload-класс (`hot`/`рестарт`); UI-формы — из схемы
+  (`echoctl config schema`), поля двуязычны (ru/en).
+- **CRUD инстансов:** добавление/правка/удаление ws-демонов (`echoctl daemons add/edit/remove`) —
+  движок/модель/порт (авто-аллокация whisper 78xx / vosk 77xx)/имя/per-instance settings.
 - **Hot-reload оркестратора:** оркестратор `fs.watch(config.json)` перечитывает безопасные поля
   (интервалы/TTL/drop_stable/requeue/ws_daemons-роутинг) на лету; restart-класс (`jobs_root`,
   `max_workers`) — кнопкой «Перезапустить оркестратор».
-- **Жизненный цикл сервисов:** старт/стоп/рестарт оркестратора и демонов из UI (инвентарь
-  `services.json` → скрипты, верификация port-probe). Нативный `orchestrator/monitor` не тронут.
-- **Тюнинг демона:** VAD (on/off, threshold, speech-pad), decode-пороги (no_speech/entropy), GPU —
-  правятся в UI, доезжают до демона **при (пере)старте** через env из config (`DAEMON_ENV_MAP`).
-- **Провижининг моделей:** вкладка «Модели» — статус ggml-ассетов + запуск `download_whisper_models.bat`.
-- Ограничение (Windows): демон, запущенный панелью, наследует её слушающий сокет :3001 — рестарт
-  панели при живых запущенных ею демонах требует освободить :3001. Подробности — `control-panel/README.md`.
+- **Жизненный цикл:** ws-демоны — через `echoctl daemons start/stop/restart` (детач, ожидание
+  реального warmup, стоп по порту); оркестратор и streaming-vosk (инвентарь `services.json`, НЕ
+  `ws_daemons`) — скриптами. Нативный `orchestrator/monitor` не тронут.
+- **Тюнинг демона:** VAD/decode-пороги/GPU правятся в UI, доезжают до демона через env при
+  (пере)старте (демон эхонит эффективные настройки при warmup).
+- **Модели:** вкладка «Модели» — статус + скачивание (`echoctl models download`) + удаление
+  (`echoctl models delete`: `--dry-run` превью референсов/файлов → `--force` каскад).
+- **Фикс утечки сокета:** ws-демоны, запущенные через echoctl, НЕ наследуют :3001
+  (`CreateProcess(bInheritHandles=FALSE)`); ограничение осталось лишь для скрипт-запуска
+  (оркестратор/vosk). Подробности — `control-panel/README.md`.
 
 ### Компоненты
 - `orchestrator/src/audio-convert.ts` — ffmpeg → pcm16le 16k mono (`config.ffmpegPath` / env `ECHOSCRIPT_FFMPEG_PATH`).
